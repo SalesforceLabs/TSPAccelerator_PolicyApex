@@ -90,21 +90,23 @@ private class TrxSec_DetectTotalAccessListViewTest {
         Datetime within24Hours = now.addHours(-23);
         Datetime outside24Hours = now.addHours(-25);
         
-        // Create records within 24-hour window (1000 records)
-        List<RecordAccessLog__c> logs = new List<RecordAccessLog__c>();
-        logs.add(new RecordAccessLog__c(
+        // Record within the 24-hour window (1000 records). CreatedDate defaults to now (insert time).
+        RecordAccessLog__c withinWindow = new RecordAccessLog__c(
             User__c = testUser.Id,
             Count_of_Records__c = 1000,
             AccessTime__c = within24Hours
-        ));
+        );
+        insert withinWindow;
         
-        // Create records outside 24-hour window (should not be counted)
-        logs.add(new RecordAccessLog__c(
+        // Record outside the 24-hour window (should not be counted). The policy now filters on
+        // CreatedDate, which cannot be set via DML, so we backdate it with Test.setCreatedDate.
+        RecordAccessLog__c outsideWindow = new RecordAccessLog__c(
             User__c = testUser.Id,
             Count_of_Records__c = 20000,
             AccessTime__c = outside24Hours
-        ));
-        insert logs;
+        );
+        insert outsideWindow;
+        Test.setCreatedDate(outsideWindow.Id, outside24Hours);
         
         // Create test ListViewEvent
         ListViewEvent testEvent = new ListViewEvent();

@@ -31,20 +31,21 @@ global with sharing class TrxSec_DetectTotalAccessReportExport implements TxnSec
         // Define the 24-hour window
         Datetime windowStart = e.EventDate.addHours(-24);
         
-        // Query custom object for aggregate record counts accessed by this user in the last 24 hours
-        // All event types now store aggregate counts only
-        Integer totalRecordsAccessed = 0;
-        
-        for (RecordAccessLog__c log : [
-            SELECT Count_of_Records__c
+        // Aggregate the record counts accessed by this user in the last 24 hours.
+        // SUM is performed in the database so the metered TSP evaluation does not iterate
+        // (potentially hundreds of thousands of) rows in Apex. CreatedDate is used because it
+        // is automatically indexed (AccessTime__c is not and cannot be indexed in a managed
+        // package); combined with the indexed User__c lookup this keeps the query selective.
+        // All event types (ApiEvent, ListViewEvent, ReportEvent) store aggregate counts only.
+        AggregateResult ar = [
+            SELECT SUM(Count_of_Records__c) totalRecords
             FROM RecordAccessLog__c
             WHERE User__c = :e.UserId 
-                AND AccessTime__c >= :windowStart
-                AND Count_of_Records__c != null
-        ]) {
-            totalRecordsAccessed += Integer.valueOf(log.Count_of_Records__c);
-        }
+                AND CreatedDate >= :windowStart
+        ];
         
-        return totalRecordsAccessed > THRESHOLD;
+        Decimal totalRecordsAccessed = (Decimal) ar.get('totalRecords');
+        
+        return totalRecordsAccessed != null && totalRecordsAccessed > THRESHOLD;
     }
 }
