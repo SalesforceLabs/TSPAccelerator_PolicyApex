@@ -132,8 +132,173 @@ private class TrxSec_DetectTotalAccessAPITest {
         // But we can verify the policy didn't throw an exception
         System.assertNotEquals(null, result, 'Policy should complete without exception');
         
+        // With no prior history, this event's own 1369 records are now counted but stay under the
+        // 10,000 threshold, so the policy still allows the operation.
+        System.assertEquals(false, result, 'A 1369-record event alone should stay below the threshold');
+        
         // Note: In a real environment, the Flow "Process_Record_Access_Event" will consume
         // the RecordAccessEvent__e and create RecordAccessLog__c records
+    }
+
+    /**
+     * REGRESSION TEST for the total-access threshold defect.
+     *
+     * With zero prior history, a single API query returning 10,001 records must trip the threshold.
+     * Before the fix the count for the event being evaluated was only published as a Platform Event
+     * and summed on a LATER evaluation, so this returned false and a fresh 24-hour window allowed an
+     * unbounded single-query extraction. This test fails against the pre-fix code.
+     */
+    @isTest
+    static void testCurrentEventAloneCrossesThreshold() {
+        User testUser = [SELECT Id FROM User WHERE Id = :UserInfo.getUserId()];
+
+        // No RecordAccessLog__c rows at all: the historical sum is null.
+        ApiEvent testEvent = new ApiEvent();
+        testEvent.UserId = testUser.Id;
+        testEvent.EventDate = Datetime.now();
+        testEvent.Records = '{"totalSize":10001,"done":true,"records":[]}';
+
+        Test.startTest();
+        TrxSec_DetectTotalAccessAPI policy = new TrxSec_DetectTotalAccessAPI();
+        Boolean result = policy.evaluate(testEvent);
+        Test.stopTest();
+
+        System.assertEquals(
+            true,
+            result,
+            'A single 10,001-record query with no prior history must trip the threshold'
+        );
+    }
+
+    /**
+     * Boundary: exactly 10,000 records in the current event with no history stays allowed, because
+     * the comparison is strictly greater than.
+     */
+    @isTest
+    static void testCurrentEventExactlyAtThreshold() {
+        User testUser = [SELECT Id FROM User WHERE Id = :UserInfo.getUserId()];
+
+        ApiEvent testEvent = new ApiEvent();
+        testEvent.UserId = testUser.Id;
+        testEvent.EventDate = Datetime.now();
+        testEvent.Records = '{"totalSize":10000,"done":true,"records":[]}';
+
+        Test.startTest();
+        TrxSec_DetectTotalAccessAPI policy = new TrxSec_DetectTotalAccessAPI();
+        Boolean result = policy.evaluate(testEvent);
+        Test.stopTest();
+
+        System.assertEquals(
+            false,
+            result,
+            'Exactly 10,000 records must not trip the threshold (comparison is > not >=)'
+        );
+    }
+
+    /**
+     * History of 9,000 plus a current event of 1,500 crosses only when combined. Neither number
+     * alone exceeds 10,000, so this only passes if the current event is actually being added.
+     */
+    @isTest
+    static void testHistoryPlusCurrentEventCrossesThreshold() {
+        User testUser = [SELECT Id FROM User WHERE Id = :UserInfo.getUserId()];
+
+        insert new RecordAccessLog__c(
+            User__c = testUser.Id,
+            Count_of_Records__c = 9000,
+            AccessTime__c = Datetime.now(),
+            Event_Type__c = 'ApiEvent'
+        );
+
+        ApiEvent testEvent = new ApiEvent();
+        testEvent.UserId = testUser.Id;
+        testEvent.EventDate = Datetime.now();
+        testEvent.Records = '{"totalSize":1500,"done":true,"records":[]}';
+
+        Test.startTest();
+        TrxSec_DetectTotalAccessAPI policy = new TrxSec_DetectTotalAccessAPI();
+        Boolean result = policy.evaluate(testEvent);
+        Test.stopTest();
+
+        System.assertEquals(
+            true,
+            result,
+            '9,000 historical plus 1,500 current records must trip the threshold'
+        );
+    }
+
+    /**
+     * A blank, null or malformed Records payload must not throw out of evaluate() and must fall back
+     * to the historical-only comparison. An exception escaping a TSP condition has unpredictable
+     * enforcement consequences.
+     */
+    @isTest
+    static void testMalformedRecordsPayloadFallsBackToHistory() {
+        User testUser = [SELECT Id FROM User WHERE Id = :UserInfo.getUserId()];
+
+        // 9,500 of history: below the threshold on its own, and no payload can add to it.
+        insert new RecordAccessLog__c(
+            User__c = testUser.Id,
+            Count_of_Records__c = 9500,
+            AccessTime__c = Datetime.now(),
+            Event_Type__c = 'ApiEvent'
+        );
+
+        List<String> unusablePayloads = new List<String>{
+            null,
+            '',
+            '   ',
+            '{ "invalid_json": ',
+            '[1,2,3]',
+            '{"someOtherKey":"someValue"}'
+        };
+
+        Test.startTest();
+        TrxSec_DetectTotalAccessAPI policy = new TrxSec_DetectTotalAccessAPI();
+        for (String payload : unusablePayloads) {
+            ApiEvent testEvent = new ApiEvent();
+            testEvent.UserId = testUser.Id;
+            testEvent.EventDate = Datetime.now();
+            testEvent.Records = payload;
+
+            Boolean result = policy.evaluate(testEvent);
+
+            System.assertEquals(
+                false,
+                result,
+                'An unusable Records payload should contribute 0 and leave the 9,500 history below ' +
+                    'the threshold. Payload: ' + payload
+            );
+        }
+        Test.stopTest();
+    }
+
+    /**
+     * History alone above the threshold still trips even when the current event contributes nothing,
+     * so the fix does not regress the original history-only detection.
+     */
+    @isTest
+    static void testHistoryAloneStillTripsWithoutCurrentPayload() {
+        User testUser = [SELECT Id FROM User WHERE Id = :UserInfo.getUserId()];
+
+        insert new RecordAccessLog__c(
+            User__c = testUser.Id,
+            Count_of_Records__c = 10001,
+            AccessTime__c = Datetime.now(),
+            Event_Type__c = 'ApiEvent'
+        );
+
+        ApiEvent testEvent = new ApiEvent();
+        testEvent.UserId = testUser.Id;
+        testEvent.EventDate = Datetime.now();
+        // No Records payload at all.
+
+        Test.startTest();
+        TrxSec_DetectTotalAccessAPI policy = new TrxSec_DetectTotalAccessAPI();
+        Boolean result = policy.evaluate(testEvent);
+        Test.stopTest();
+
+        System.assertEquals(true, result, 'Historical total above the threshold must still trip');
     }
     
     /**

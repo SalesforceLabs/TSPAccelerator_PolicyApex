@@ -3,7 +3,7 @@
  */
 global with sharing class TrxSec_DetectDormantUser implements TxnSecurity.EventCondition {
     
-    // Configurable threshold: Number of days without login to consider account dormant
+    // Configurable threshold: Number of days without a successful login to consider account dormant
     private static final Integer DORMANT_DAYS_THRESHOLD = 90;
 
     public class LoginAttempt {
@@ -17,7 +17,8 @@ global with sharing class TrxSec_DetectDormantUser implements TxnSecurity.EventC
     }
 
     public interface Provider {
-        List<LoginAttempt> getRecentLogins(Id userId, DateTime currentLoginTime);
+        List<LoginAttempt> getLoginsInWindow(Id userId, DateTime windowStart, DateTime currentLoginTime);
+        Boolean hasAnyLoginHistory(Id userId, DateTime currentLoginTime);
     }
 
     @TestVisible
@@ -48,35 +49,21 @@ global with sharing class TrxSec_DetectDormantUser implements TxnSecurity.EventC
             
             // Get the current login timestamp
             DateTime currentLoginTime = loginEvent.EventDate;
+            DateTime windowStart = currentLoginTime.addDays(-DORMANT_DAYS_THRESHOLD);
             
-            // Fetch recent logins via provider so tests can be deterministic across orgs
-            // Note: Status field cannot be filtered directly in SOQL, so we query more records
-            // and filter in memory to find the last successful login
-            List<LoginAttempt> recentLogins = provider.getRecentLogins(loginEvent.UserId, currentLoginTime);
-            
-            // Filter to find the most recent successful login
-            DateTime lastLoginTime = null;
-            for (LoginAttempt login : recentLogins) {
+            // Fetch logins via provider so tests can be deterministic across orgs.
+            // Note: Status cannot be filtered in SOQL on LoginHistory, so the query is bounded by
+            // the dormancy window and the success check is done in memory.
+            List<LoginAttempt> loginsInWindow = provider.getLoginsInWindow(loginEvent.UserId, windowStart, currentLoginTime);
+            for (LoginAttempt login : loginsInWindow) {
                 if (login != null && login.status == 'Success') {
-                    lastLoginTime = login.loginTime;
-                    break; // Found the most recent successful login
+                    return false;
                 }
             }
             
-            // If no previous successful login found, this could be the first successful login
-            // or all recent logins were failures
-            if (lastLoginTime == null) {
-                // Optional: Return true for first-time logins requiring extra verification
-                // Or return false to skip first-time logins
-                return false; // Change to true if you want to flag first-time logins
-            }
-            
-            // Calculate days since last login
-            Long millisecondsSinceLastLogin = currentLoginTime.getTime() - lastLoginTime.getTime();
-            Integer daysSinceLastLogin = (Integer)(millisecondsSinceLastLogin / (1000 * 60 * 60 * 24));
-            
-            // Return true if the account has been dormant beyond the threshold
-            return daysSinceLastLogin >= DORMANT_DAYS_THRESHOLD;
+            // No successful login inside the window. A user with no login history at all is a new
+            // account rather than a dormant one, so the policy does not apply.
+            return provider.hasAnyLoginHistory(loginEvent.UserId, currentLoginTime);
             
         } catch (Exception e) {
             // Return false to prevent blocking legitimate logins
@@ -86,14 +73,14 @@ global with sharing class TrxSec_DetectDormantUser implements TxnSecurity.EventC
     }
 
     private with sharing class DefaultProvider implements Provider {
-        public List<LoginAttempt> getRecentLogins(Id userId, DateTime currentLoginTime) {
+        public List<LoginAttempt> getLoginsInWindow(Id userId, DateTime windowStart, DateTime currentLoginTime) {
             List<LoginHistory> histories = [
                 SELECT LoginTime, UserId, Status
                 FROM LoginHistory
                 WHERE UserId = :userId
                     AND LoginTime < :currentLoginTime
+                    AND LoginTime >= :windowStart
                 ORDER BY LoginTime DESC
-                LIMIT 10
             ];
 
             List<LoginAttempt> attempts = new List<LoginAttempt>();
@@ -102,6 +89,15 @@ global with sharing class TrxSec_DetectDormantUser implements TxnSecurity.EventC
             }
             return attempts;
         }
+
+        public Boolean hasAnyLoginHistory(Id userId, DateTime currentLoginTime) {
+            return ![
+                SELECT Id
+                FROM LoginHistory
+                WHERE UserId = :userId
+                    AND LoginTime < :currentLoginTime
+                LIMIT 1
+            ].isEmpty();
+        }
     }
 }
-

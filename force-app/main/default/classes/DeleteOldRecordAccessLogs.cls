@@ -13,6 +13,16 @@
  * The invocable method and its request/result wrapper classes are global so that subscribers
  * of the managed package can invoke this action from their own flows, the Actions REST API,
  * or Apex. Only the entry-point API surface is global; internal helpers remain private.
+ *
+ * Security: because that entry point is reachable by any caller who can run a flow or hit the
+ * Actions REST API, and because RecordAccessLog__c is a security audit log that this class
+ * hard-deletes, delete permission is enforced in two places:
+ *   1. The invocable and start() reject callers without Delete on RecordAccessLog__c, so an
+ *      unauthorized request is refused up front rather than failing mid-job hours later.
+ *   2. The query and the DML run in USER_MODE, so enforcement happens at the point of action
+ *      and cannot drift from the checks above.
+ * Database.emptyRecycleBin has no AccessLevel overload and always runs in system mode, but it
+ * is only ever handed Ids that were already successfully deleted under USER_MODE.
  */
 global with sharing class DeleteOldRecordAccessLogs implements Database.Batchable<SObject>, Database.Stateful {
 
@@ -41,8 +51,9 @@ global with sharing class DeleteOldRecordAccessLogs implements Database.Batchabl
     }
 
     /**
-     * @description Invocable entry point for Flow. Validates input and enqueues a Batch Apex
-     *              job to perform the deletion asynchronously.
+     * @description Invocable entry point for Flow. Verifies the caller may delete
+     *              RecordAccessLog__c records, validates input, and enqueues a Batch Apex job
+     *              to perform the deletion asynchronously.
      * @param requests List of cleanup requests with threshold configuration
      * @return List of cleanup results indicating whether the job was enqueued
      */
@@ -54,13 +65,26 @@ global with sharing class DeleteOldRecordAccessLogs implements Database.Batchabl
     global static List<CleanupResult> deleteOldRecords(List<CleanupRequest> requests) {
         List<CleanupResult> results = new List<CleanupResult>();
 
+        Boolean deleteAllowed = isDeleteAllowed();
+
         for (CleanupRequest request : requests) {
             CleanupResult result = new CleanupResult();
 
-            // Validate input
-            if (request.daysThreshold == null || request.daysThreshold < 0) {
+            // Authorization before input validation, so an unauthorized caller learns nothing
+            // about which thresholds would have been accepted.
+            if (!deleteAllowed) {
                 result.success = false;
-                result.errorMessage = 'Invalid threshold: Days threshold must be a non-negative integer.';
+                result.errorMessage = 'Insufficient access: you do not have permission to delete '
+                    + 'Record Access Log records.';
+                results.add(result);
+                continue;
+            }
+
+            // A threshold of 0 would delete every record created before today, so require at
+            // least one full day of retention.
+            if (request.daysThreshold == null || request.daysThreshold < 1) {
+                result.success = false;
+                result.errorMessage = 'Invalid threshold: Days threshold must be a positive integer (1 or greater).';
                 results.add(result);
                 continue;
             }
@@ -86,12 +110,22 @@ global with sharing class DeleteOldRecordAccessLogs implements Database.Batchabl
     }
 
     global Database.QueryLocator start(Database.BatchableContext bc) {
+        // Re-checked here (not just in the invocable) because the global constructor lets
+        // subscribers submit this batch directly via Database.executeBatch. Failing in start()
+        // aborts the whole job before any chunk deletes anything.
+        if (!isDeleteAllowed()) {
+            throw new DeleteOldRecordAccessLogsException(
+                'Insufficient access: the running user does not have permission to delete '
+                + 'Record Access Log records.');
+        }
+
         // QueryLocator streams rows and is not subject to the 50,000 query-rows limit.
         Date cutoffDate = Date.today().addDays(-daysThreshold);
         return Database.getQueryLocator([
             SELECT Id
             FROM RecordAccessLog__c
             WHERE CreatedDate < :cutoffDate
+            WITH USER_MODE
         ]);
     }
 
@@ -101,7 +135,9 @@ global with sharing class DeleteOldRecordAccessLogs implements Database.Batchabl
         }
 
         // allOrNone = false: individual row failures don't roll back the whole chunk.
-        List<Database.DeleteResult> deleteResults = Database.delete(scope, false, AccessLevel.SYSTEM_MODE);
+        // USER_MODE: object permissions and sharing are enforced by the platform at the point
+        // of deletion, so the checks above cannot be bypassed or go stale.
+        List<Database.DeleteResult> deleteResults = Database.delete(scope, false, AccessLevel.USER_MODE);
 
         // Build the purge list from only the rows that were deleted successfully.
         List<Id> deletedIds = new List<Id>();
@@ -121,6 +157,14 @@ global with sharing class DeleteOldRecordAccessLogs implements Database.Batchabl
         System.debug(LoggingLevel.INFO,
             'DeleteOldRecordAccessLogs finished. Soft-deleted=' + this.totalSoftDeleted
             + ', hard-deleted=' + this.totalHardDeleted);
+    }
+
+    /**
+     * @description Whether the running user has object-level Delete on RecordAccessLog__c.
+     *              Field-level security is not consulted: it does not apply to delete.
+     */
+    private static Boolean isDeleteAllowed() {
+        return Schema.SObjectType.RecordAccessLog__c.isDeletable();
     }
 
     /**
@@ -148,12 +192,18 @@ global with sharing class DeleteOldRecordAccessLogs implements Database.Batchabl
     }
 
     /**
+     * @description Thrown when the running user lacks Delete on RecordAccessLog__c. Global so
+     *              that subscribers submitting the batch directly can catch it by type.
+     */
+    global class DeleteOldRecordAccessLogsException extends Exception {}
+
+    /**
      * @description Input wrapper class for Flow integration
      */
     global class CleanupRequest {
         @InvocableVariable(
             label='Days Threshold'
-            description='Number of days to use as threshold. Records older than this will be deleted.'
+            description='Number of days to use as threshold (minimum 1). Records older than this will be deleted.'
             required=true
         )
         global Integer daysThreshold;

@@ -27,57 +27,7 @@ public with sharing class LogMultipleRecordAccess {
             }
             
             try {
-                Map<String, Object> parsed = (Map<String, Object>) JSON.deserializeUntyped(recordsJson);
-                System.debug(LoggingLevel.INFO, 'LogMultipleRecordAccess.logAccess: JSON parsed successfully. keys=' + parsed.keySet());
-                
-                Integer recordCount = null;
-                
-                // Format 1: {"totalSize":1369,"done":true,"records":[...]} - ApiEvent with totalSize
-                if (parsed.containsKey('totalSize')) {
-                    System.debug(LoggingLevel.INFO, 'LogMultipleRecordAccess.logAccess: found totalSize format');
-                    Object totalSizeObj = parsed.get('totalSize');
-                    if (totalSizeObj instanceof Integer) {
-                        recordCount = (Integer) totalSizeObj;
-                    } else if (totalSizeObj instanceof Long) {
-                        recordCount = ((Long) totalSizeObj).intValue();
-                    } else if (totalSizeObj instanceof Decimal) {
-                        recordCount = ((Decimal) totalSizeObj).intValue();
-                    }
-                    System.debug(LoggingLevel.INFO, 'LogMultipleRecordAccess.logAccess: extracted totalSize=' + recordCount);
-                }
-                // Format 2: {"records": [{"Id": "..."}, ...]} - ListViewEvent/ReportEvent
-                // Count the records array instead of storing individual IDs
-                else if (parsed.containsKey('records')) {
-                    System.debug(LoggingLevel.INFO, 'LogMultipleRecordAccess.logAccess: found records array format');
-                    List<Object> records = (List<Object>) parsed.get('records');
-                    recordCount = records != null ? records.size() : 0;
-                    System.debug(LoggingLevel.INFO, 'LogMultipleRecordAccess.logAccess: counted ' + recordCount + ' records');
-                }
-                // Format 3: {"totalSize":1,"rows":[{"datacells":["005...", "001..."]}]}
-                // Count unique record IDs from datacells
-                else if (parsed.containsKey('rows')) {
-                    System.debug(LoggingLevel.INFO, 'LogMultipleRecordAccess.logAccess: found rows/datacells format');
-                    List<Object> rows = (List<Object>) parsed.get('rows');
-                    Set<String> uniqueRecordIds = new Set<String>();
-                    
-                    if (rows != null) {
-                        for (Object rowObj : rows) {
-                            Map<String, Object> rowMap = (Map<String, Object>) rowObj;
-                            List<Object> datacells = (List<Object>) rowMap.get('datacells');
-                            
-                            if (datacells != null) {
-                                for (Object cellObj : datacells) {
-                                    String recordId = (String) cellObj;
-                                    if (recordId != null && recordId.length() >= 15) {
-                                        uniqueRecordIds.add(recordId);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    recordCount = uniqueRecordIds.size();
-                    System.debug(LoggingLevel.INFO, 'LogMultipleRecordAccess.logAccess: counted ' + recordCount + ' unique record IDs');
-                }
+                Integer recordCount = extractRecordCount(recordsJson);
 
                 // Create a single aggregate log with the count
                 if (recordCount != null && recordCount > 0) {
@@ -127,6 +77,94 @@ public with sharing class LogMultipleRecordAccess {
     }
 
     /**
+     * @description Derives the number of accessed records from an event's Records JSON payload.
+     *
+     * This is the single source of truth for that derivation. logAccess uses it for the count it
+     * persists to RecordAccessLog__c.Count_of_Records__c, and the TSP EventConditions use it to
+     * score the event currently being evaluated. Because both paths call this method, the
+     * in-memory count a condition adds and the historical sum it adds to are always the same
+     * unit of measure.
+     *
+     * Handles the three payload shapes Real-Time Event Monitoring produces:
+     *   1. {"totalSize":1369,"done":true,"records":[...]}          - ApiEvent
+     *   2. {"records":[{"Id":"..."},...]}                          - records array without totalSize
+     *   3. {"totalSize":1,"rows":[{"datacells":["005...","001..."]}]} - ListViewEvent/ReportEvent
+     *
+     * @param recordsJson The raw Records payload from an ApiEvent, ListViewEvent or ReportEvent.
+     * @return The record count, or 0 when the payload is absent, empty, or cannot be parsed.
+     *         Never throws: callers include TSP conditions, where an escaping exception has
+     *         unpredictable enforcement consequences.
+     */
+    public static Integer extractRecordCount(String recordsJson) {
+        if (String.isBlank(recordsJson)) {
+            System.debug(LoggingLevel.WARN, 'LogMultipleRecordAccess.extractRecordCount: recordsJson blank, returning 0');
+            return 0;
+        }
+
+        Integer recordCount = null;
+
+        try {
+            Map<String, Object> parsed = (Map<String, Object>) JSON.deserializeUntyped(recordsJson);
+            System.debug(LoggingLevel.INFO, 'LogMultipleRecordAccess.extractRecordCount: JSON parsed successfully. keys=' + parsed.keySet());
+
+            // Format 1: {"totalSize":1369,"done":true,"records":[...]} - ApiEvent with totalSize
+            if (parsed.containsKey('totalSize')) {
+                System.debug(LoggingLevel.INFO, 'LogMultipleRecordAccess.extractRecordCount: found totalSize format');
+                Object totalSizeObj = parsed.get('totalSize');
+                if (totalSizeObj instanceof Integer) {
+                    recordCount = (Integer) totalSizeObj;
+                } else if (totalSizeObj instanceof Long) {
+                    recordCount = ((Long) totalSizeObj).intValue();
+                } else if (totalSizeObj instanceof Decimal) {
+                    recordCount = ((Decimal) totalSizeObj).intValue();
+                }
+                System.debug(LoggingLevel.INFO, 'LogMultipleRecordAccess.extractRecordCount: extracted totalSize=' + recordCount);
+            }
+            // Format 2: {"records": [{"Id": "..."}, ...]} - ListViewEvent/ReportEvent
+            // Count the records array instead of storing individual IDs
+            else if (parsed.containsKey('records')) {
+                System.debug(LoggingLevel.INFO, 'LogMultipleRecordAccess.extractRecordCount: found records array format');
+                List<Object> records = (List<Object>) parsed.get('records');
+                recordCount = records != null ? records.size() : 0;
+                System.debug(LoggingLevel.INFO, 'LogMultipleRecordAccess.extractRecordCount: counted ' + recordCount + ' records');
+            }
+            // Format 3: {"totalSize":1,"rows":[{"datacells":["005...", "001..."]}]}
+            // Count unique record IDs from datacells
+            else if (parsed.containsKey('rows')) {
+                System.debug(LoggingLevel.INFO, 'LogMultipleRecordAccess.extractRecordCount: found rows/datacells format');
+                List<Object> rows = (List<Object>) parsed.get('rows');
+                Set<String> uniqueRecordIds = new Set<String>();
+
+                if (rows != null) {
+                    for (Object rowObj : rows) {
+                        Map<String, Object> rowMap = (Map<String, Object>) rowObj;
+                        List<Object> datacells = (List<Object>) rowMap.get('datacells');
+
+                        if (datacells != null) {
+                            for (Object cellObj : datacells) {
+                                String recordId = (String) cellObj;
+                                if (recordId != null && recordId.length() >= 15) {
+                                    uniqueRecordIds.add(recordId);
+                                }
+                            }
+                        }
+                    }
+                }
+                recordCount = uniqueRecordIds.size();
+                System.debug(LoggingLevel.INFO, 'LogMultipleRecordAccess.extractRecordCount: counted ' + recordCount + ' unique record IDs');
+            }
+        } catch (JSONException je) {
+            // Log parsing failures without exposing sensitive details
+            System.debug(LoggingLevel.WARN, 'LogMultipleRecordAccess.extractRecordCount: failed to parse RecordsField JSON.');
+        } catch (Exception e) {
+            // Intentionally not logging exception details to avoid sensitive info exposure
+            System.debug(LoggingLevel.WARN, 'LogMultipleRecordAccess.extractRecordCount: unexpected error while processing RecordsField.');
+        }
+
+        return recordCount != null && recordCount > 0 ? recordCount : 0;
+    }
+
+    /**
      * @description Publishes record access events for async processing.
      * TSP policies cannot perform DML (limit is 0), so we use Platform Events.
      */
@@ -163,31 +201,6 @@ public with sharing class LogMultipleRecordAccess {
         }
     }
 
-    private class LogAccessQueueable implements Queueable {
-        private final String recordsJson;
-        private final Id userId;
-        private final Datetime eventDate;
-
-        private LogAccessQueueable(String recordsJson, Id userId, Datetime eventDate) {
-            this.recordsJson = recordsJson;
-            this.userId = userId;
-            this.eventDate = eventDate;
-        }
-
-        public void execute(QueueableContext context) {
-            try {
-                InputWrapper input = new InputWrapper();
-                input.RecordsField = recordsJson;
-                input.UserId = userId;
-                input.EventDate = eventDate;
-                LogMultipleRecordAccess.logAccess(new List<InputWrapper>{ input });
-            } catch (Exception e) {
-                // Don't fail the async job in a security policy pipeline; keep errors non-blocking.
-                System.debug(LoggingLevel.WARN, 'LogMultipleRecordAccess: async logging job failed.');
-            }
-        }
-    }
-    
     public class InputWrapper {
         @InvocableVariable(required=true)
         public String RecordsField; 

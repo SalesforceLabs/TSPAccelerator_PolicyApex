@@ -27,6 +27,30 @@ global with sharing class TrxSec_DetectTotalAccessListView implements TxnSecurit
             System.debug(LoggingLevel.WARN, 'TrxSec_DetectTotalAccessListView: failed to start access logging. type=' + ex.getTypeName());
         }
         
+        // Derive this event's own record count so the operation being evaluated contributes to the
+        // decision that gates it. logAccessAsync above only publishes a Platform Event, so the row
+        // for this event is not persisted until a subscribing Flow runs; without this the aggregate
+        // below sees history only and a single unbounded list view in a fresh window can never trip
+        // the threshold. The same extractRecordCount call is what the Flow's logAccess uses to
+        // derive Count_of_Records__c, so this in-memory count and the persisted history share one
+        // basis.
+        //
+        // ListViewEvent.RowsProcessed is deliberately not used. When a list view execution is
+        // chunked, every ListViewEvent sharing an ExecutionIdentifier carries the SAME
+        // RowsProcessed (the total for the whole execution) and differs only in Records and
+        // Sequence, so adding RowsProcessed per event would count an N-chunk execution N times.
+        // Records holds this chunk's own data, which is also the unit logAccessAsync publishes per
+        // chunk, so each chunk is counted exactly once with no cross-event de-duplication needed.
+        Integer currentEventRecordCount = 0;
+        try {
+            currentEventRecordCount = LogMultipleRecordAccess.extractRecordCount(e.Records);
+        } catch (Exception ex) {
+            // Fall through to the historical-only comparison rather than letting anything escape a
+            // TSP condition, where a thrown exception has unpredictable enforcement consequences.
+            System.debug(LoggingLevel.WARN, 'TrxSec_DetectTotalAccessListView: could not derive current event record count, treating as 0. type=' + ex.getTypeName());
+            currentEventRecordCount = 0;
+        }
+
         // Define the 24-hour window
         Datetime windowStart = e.EventDate.addHours(-24);
         
@@ -45,6 +69,10 @@ global with sharing class TrxSec_DetectTotalAccessListView implements TxnSecurit
         
         Decimal totalRecordsAccessed = (Decimal) ar.get('totalRecords');
         
-        return totalRecordsAccessed != null && totalRecordsAccessed > THRESHOLD;
+        // SUM returns null when the user has no rows in the window; treat that as zero history.
+        Decimal historicalRecordsAccessed = totalRecordsAccessed != null ? totalRecordsAccessed : 0;
+        Decimal combinedRecordsAccessed = historicalRecordsAccessed + currentEventRecordCount;
+        
+        return combinedRecordsAccessed > THRESHOLD;
     }
 }

@@ -24,7 +24,7 @@ global with sharing class TrxSec_DetectHighRiskReportExports implements TxnSecur
         if (highRiskLevels.isEmpty()) { return false; }
 
         ReportEvent reportEvent = (ReportEvent) event;
-        if (String.isBlank(reportEvent.Operation) || !reportEvent.Operation.startsWith('ReportExported')) { // remove this if block if you want to block the field from even being added for previews, etc.
+        if (!TrxSec_ReportEventUtils.isReportExportOperation(reportEvent.Operation)) { // remove this if block if you want to block the field from even being added for previews, etc.
             return false;
         }
 

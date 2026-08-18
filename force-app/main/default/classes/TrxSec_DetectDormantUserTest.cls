@@ -5,32 +5,53 @@
 private class TrxSec_DetectDormantUserTest {
 
     private class StubProvider implements TrxSec_DetectDormantUser.Provider {
-        private final List<TrxSec_DetectDormantUser.LoginAttempt> recentLogins;
+        private final List<TrxSec_DetectDormantUser.LoginAttempt> loginsInWindow;
+        private final Boolean hasAnyHistory;
         private final Boolean shouldThrow;
+        private DateTime capturedWindowStart;
 
-        StubProvider(List<TrxSec_DetectDormantUser.LoginAttempt> recentLogins) {
-            this.recentLogins = recentLogins;
+        StubProvider(List<TrxSec_DetectDormantUser.LoginAttempt> loginsInWindow, Boolean hasAnyHistory) {
+            this.loginsInWindow = loginsInWindow == null
+                ? new List<TrxSec_DetectDormantUser.LoginAttempt>()
+                : loginsInWindow;
+            // Logins inside the window are themselves login history
+            this.hasAnyHistory = hasAnyHistory || !this.loginsInWindow.isEmpty();
             this.shouldThrow = false;
         }
 
         StubProvider(Boolean shouldThrow) {
-            this.recentLogins = new List<TrxSec_DetectDormantUser.LoginAttempt>();
+            this.loginsInWindow = new List<TrxSec_DetectDormantUser.LoginAttempt>();
+            this.hasAnyHistory = false;
             this.shouldThrow = shouldThrow;
         }
 
-        public List<TrxSec_DetectDormantUser.LoginAttempt> getRecentLogins(Id userId, DateTime currentLoginTime) {
+        public List<TrxSec_DetectDormantUser.LoginAttempt> getLoginsInWindow(Id userId, DateTime windowStart, DateTime currentLoginTime) {
             if (shouldThrow == true) {
                 // Any exception should be caught and return false
                 throw new TestProviderException('boom');
             }
-            return recentLogins == null ? new List<TrxSec_DetectDormantUser.LoginAttempt>() : recentLogins;
+            capturedWindowStart = windowStart;
+            return loginsInWindow;
+        }
+
+        public Boolean hasAnyLoginHistory(Id userId, DateTime currentLoginTime) {
+            if (shouldThrow == true) {
+                throw new TestProviderException('boom');
+            }
+            return hasAnyHistory;
         }
     }
 
     private class TestProviderException extends Exception {}
 
-    private static void useProvider(List<TrxSec_DetectDormantUser.LoginAttempt> recentLogins) {
-        TrxSec_DetectDormantUser.provider = new StubProvider(recentLogins);
+    private static StubProvider useProvider(List<TrxSec_DetectDormantUser.LoginAttempt> loginsInWindow) {
+        return useProvider(loginsInWindow, false);
+    }
+
+    private static StubProvider useProvider(List<TrxSec_DetectDormantUser.LoginAttempt> loginsInWindow, Boolean hasAnyHistory) {
+        StubProvider stub = new StubProvider(loginsInWindow, hasAnyHistory);
+        TrxSec_DetectDormantUser.provider = stub;
+        return stub;
     }
 
     private static void useThrowingProvider() {
@@ -72,17 +93,17 @@ private class TrxSec_DetectDormantUserTest {
     }
 
     @isTest
-    static void testNoPreviousSuccessfulLoginReturnsFalse() {
-        // No recent logins -> lastLoginTime stays null -> returns false
-        useProvider(new List<TrxSec_DetectDormantUser.LoginAttempt>());
+    static void testNewUserWithNoLoginHistoryReturnsFalse() {
+        // No logins at all is the only path for a new user, so the policy does not apply
+        useProvider(new List<TrxSec_DetectDormantUser.LoginAttempt>(), false);
 
         LoginEvent testEvent = buildLoginEvent(DateTime.now());
         Boolean result = new TrxSec_DetectDormantUser().evaluate((SObject)testEvent);
-        System.assertEquals(false, result, 'No previous successful login should not trigger policy');
+        System.assertEquals(false, result, 'A user with no login history should not trigger policy');
     }
 
     @isTest
-    static void testAllFailuresReturnFalse() {
+    static void testOnlyFailedLoginsInWindowReturnsTrue() {
         DateTime nowTime = DateTime.now();
         List<TrxSec_DetectDormantUser.LoginAttempt> logins = new List<TrxSec_DetectDormantUser.LoginAttempt>{
             new TrxSec_DetectDormantUser.LoginAttempt(nowTime.addDays(-1), 'Failed'),
@@ -92,35 +113,45 @@ private class TrxSec_DetectDormantUserTest {
 
         LoginEvent testEvent = buildLoginEvent(nowTime);
         Boolean result = new TrxSec_DetectDormantUser().evaluate((SObject)testEvent);
-        System.assertEquals(false, result, 'All failures should not trigger policy');
+        System.assertEquals(true, result, 'Failed logins are not successful logins, so the account is dormant');
     }
 
     @isTest
     static void testNonDormantUserReturnsFalse() {
         DateTime nowTime = DateTime.now();
-        // Most recent successful login is within threshold (< 90 days)
+        // A successful login exists inside the window, even if it is not the most recent attempt
         List<TrxSec_DetectDormantUser.LoginAttempt> logins = new List<TrxSec_DetectDormantUser.LoginAttempt>{
+            new TrxSec_DetectDormantUser.LoginAttempt(nowTime.addDays(-1), 'Failed'),
             new TrxSec_DetectDormantUser.LoginAttempt(nowTime.addDays(-10), 'Success')
         };
         useProvider(logins);
 
         LoginEvent testEvent = buildLoginEvent(nowTime);
         Boolean result = new TrxSec_DetectDormantUser().evaluate((SObject)testEvent);
-        System.assertEquals(false, result, 'Recent successful login should not be considered dormant');
+        System.assertEquals(false, result, 'Successful login inside the window should not be considered dormant');
     }
 
     @isTest
     static void testDormantUserReturnsTrue() {
         DateTime nowTime = DateTime.now();
-        // Most recent successful login is beyond threshold (>= 90 days)
-        List<TrxSec_DetectDormantUser.LoginAttempt> logins = new List<TrxSec_DetectDormantUser.LoginAttempt>{
-            new TrxSec_DetectDormantUser.LoginAttempt(nowTime.addDays(-91), 'Success')
-        };
-        useProvider(logins);
+        // Nothing inside the window, but the user has older login history
+        useProvider(new List<TrxSec_DetectDormantUser.LoginAttempt>(), true);
 
         LoginEvent testEvent = buildLoginEvent(nowTime);
         Boolean result = new TrxSec_DetectDormantUser().evaluate((SObject)testEvent);
-        System.assertEquals(true, result, 'Old successful login should be considered dormant');
+        System.assertEquals(true, result, 'No successful login in the window should be considered dormant');
+    }
+
+    @isTest
+    static void testQueryWindowIsBoundedByThreshold() {
+        DateTime nowTime = DateTime.now();
+        StubProvider stub = useProvider(new List<TrxSec_DetectDormantUser.LoginAttempt>(), true);
+
+        LoginEvent testEvent = buildLoginEvent(nowTime);
+        new TrxSec_DetectDormantUser().evaluate((SObject)testEvent);
+
+        System.assertEquals(testEvent.EventDate.addDays(-90), stub.capturedWindowStart,
+            'Window should start 90 days before the current login');
     }
 
     @isTest
@@ -134,10 +165,16 @@ private class TrxSec_DetectDormantUserTest {
 
     @isTest
     static void testDefaultProviderMethodsCovered() {
-        // Cover DefaultProvider SOQL path; result can be empty depending on org
+        // Cover DefaultProvider SOQL paths; results depend on org data
         TrxSec_DetectDormantUser.resetProviderForTest();
-        List<TrxSec_DetectDormantUser.LoginAttempt> logins = TrxSec_DetectDormantUser.provider.getRecentLogins(UserInfo.getUserId(), DateTime.now());
+        DateTime nowTime = DateTime.now();
+
+        List<TrxSec_DetectDormantUser.LoginAttempt> logins =
+            TrxSec_DetectDormantUser.provider.getLoginsInWindow(UserInfo.getUserId(), nowTime.addDays(-90), nowTime);
         System.assertNotEquals(null, logins, 'Default provider should return a non-null list');
+
+        Boolean hasHistory = TrxSec_DetectDormantUser.provider.hasAnyLoginHistory(UserInfo.getUserId(), nowTime);
+        System.assertNotEquals(null, hasHistory, 'Default provider should return a non-null history flag');
     }
     
     /**
@@ -404,8 +441,8 @@ private class TrxSec_DetectDormantUserTest {
         
         Test.startTest();
         
-        // Simulate multiple login events
-        for (Integer i = 0; i < 50; i++) {
+        // Simulate multiple login events; each evaluation issues up to two queries
+        for (Integer i = 0; i < 40; i++) {
             LoginEvent testEvent = new LoginEvent(
                 LoginType = 'Application',
                 UserId = UserInfo.getUserId(),
@@ -418,7 +455,7 @@ private class TrxSec_DetectDormantUserTest {
         Test.stopTest();
         
         // All evaluations should complete without errors
-        System.assertEquals(50, results.size(), 'All 50 evaluations should complete');
+        System.assertEquals(40, results.size(), 'All 40 evaluations should complete');
         
         // Check SOQL query limits
         System.assert(Limits.getQueries() <= Limits.getLimitQueries(), 

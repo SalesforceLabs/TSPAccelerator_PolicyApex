@@ -312,6 +312,187 @@ private class TrxSec_DetectTotalAccessListViewTest {
     }
     
     /**
+     * REGRESSION TEST for the total-access threshold defect.
+     *
+     * With zero prior history, a single list view execution returning 10,001 records must trip the
+     * threshold. Before the fix the count for the event being evaluated was only published as a
+     * Platform Event and summed on a LATER evaluation, so this returned false and a fresh 24-hour
+     * window allowed an unbounded single-execution extraction. This test fails against the pre-fix
+     * code.
+     */
+    @isTest
+    static void testCurrentEventAloneCrossesThreshold() {
+        User testUser = [SELECT Id FROM User WHERE Id = :UserInfo.getUserId()];
+
+        // No RecordAccessLog__c rows at all: the historical sum is null.
+        ListViewEvent testEvent = new ListViewEvent();
+        testEvent.UserId = testUser.Id;
+        testEvent.EventDate = Datetime.now();
+        testEvent.Records = '{"totalSize":10001,"rows":[{"datacells":["001000000000001AAA"]}]}';
+
+        Test.startTest();
+        TrxSec_DetectTotalAccessListView policy = new TrxSec_DetectTotalAccessListView();
+        Boolean result = policy.evaluate(testEvent);
+        Test.stopTest();
+
+        System.assertEquals(
+            true,
+            result,
+            'A single 10,001-record list view with no prior history must trip the threshold'
+        );
+    }
+
+    /**
+     * Boundary: exactly 10,000 records in the current event with no history stays allowed, because
+     * the comparison is strictly greater than.
+     */
+    @isTest
+    static void testCurrentEventExactlyAtThreshold() {
+        User testUser = [SELECT Id FROM User WHERE Id = :UserInfo.getUserId()];
+
+        ListViewEvent testEvent = new ListViewEvent();
+        testEvent.UserId = testUser.Id;
+        testEvent.EventDate = Datetime.now();
+        testEvent.Records = '{"totalSize":10000,"rows":[]}';
+
+        Test.startTest();
+        TrxSec_DetectTotalAccessListView policy = new TrxSec_DetectTotalAccessListView();
+        Boolean result = policy.evaluate(testEvent);
+        Test.stopTest();
+
+        System.assertEquals(
+            false,
+            result,
+            'Exactly 10,000 records must not trip the threshold (comparison is > not >=)'
+        );
+    }
+
+    /**
+     * History of 9,000 plus a current event of 1,500 crosses only when combined. Neither number
+     * alone exceeds 10,000, so this only passes if the current event is actually being added.
+     */
+    @isTest
+    static void testHistoryPlusCurrentEventCrossesThreshold() {
+        User testUser = [SELECT Id FROM User WHERE Id = :UserInfo.getUserId()];
+
+        insert new RecordAccessLog__c(
+            User__c = testUser.Id,
+            Count_of_Records__c = 9000,
+            AccessTime__c = Datetime.now(),
+            Event_Type__c = 'ListViewEvent'
+        );
+
+        ListViewEvent testEvent = new ListViewEvent();
+        testEvent.UserId = testUser.Id;
+        testEvent.EventDate = Datetime.now();
+        testEvent.Records = '{"totalSize":1500,"rows":[]}';
+
+        Test.startTest();
+        TrxSec_DetectTotalAccessListView policy = new TrxSec_DetectTotalAccessListView();
+        Boolean result = policy.evaluate(testEvent);
+        Test.stopTest();
+
+        System.assertEquals(
+            true,
+            result,
+            '9,000 historical plus 1,500 current records must trip the threshold'
+        );
+    }
+
+    /**
+     * A blank, null or malformed Records payload must not throw out of evaluate() and must fall back
+     * to the historical-only comparison. An exception escaping a TSP condition has unpredictable
+     * enforcement consequences.
+     */
+    @isTest
+    static void testMalformedRecordsPayloadFallsBackToHistory() {
+        User testUser = [SELECT Id FROM User WHERE Id = :UserInfo.getUserId()];
+
+        // 9,500 of history: below the threshold on its own, and no payload can add to it.
+        insert new RecordAccessLog__c(
+            User__c = testUser.Id,
+            Count_of_Records__c = 9500,
+            AccessTime__c = Datetime.now(),
+            Event_Type__c = 'ListViewEvent'
+        );
+
+        List<String> unusablePayloads = new List<String>{
+            null,
+            '',
+            '   ',
+            '{ "invalid_json": ',
+            '[1,2,3]',
+            '{"someOtherKey":"someValue"}'
+        };
+
+        Test.startTest();
+        TrxSec_DetectTotalAccessListView policy = new TrxSec_DetectTotalAccessListView();
+        for (String payload : unusablePayloads) {
+            ListViewEvent testEvent = new ListViewEvent();
+            testEvent.UserId = testUser.Id;
+            testEvent.EventDate = Datetime.now();
+            testEvent.Records = payload;
+
+            Boolean result = policy.evaluate(testEvent);
+
+            System.assertEquals(
+                false,
+                result,
+                'An unusable Records payload should contribute 0 and leave the 9,500 history below ' +
+                    'the threshold. Payload: ' + payload
+            );
+        }
+        Test.stopTest();
+    }
+
+    /**
+     * ListViewEvent is chunked exactly like ReportEvent: correlated events share an
+     * ExecutionIdentifier and carry the SAME RowsProcessed (the total for the whole execution),
+     * differing only in Records and Sequence. The condition therefore counts each chunk's own
+     * Records payload, never RowsProcessed. If RowsProcessed were used, each of these two chunks
+     * would independently see 12,000 and trip the threshold.
+     */
+    @isTest
+    static void testChunkedExecutionIsNotCountedPerChunk() {
+        User testUser = [SELECT Id FROM User WHERE Id = :UserInfo.getUserId()];
+        Datetime now = Datetime.now();
+        String executionIdentifier = 'a50a4025-84f2-425d-8af9-2c780869f3b5';
+
+        ListViewEvent chunkOne = new ListViewEvent();
+        chunkOne.UserId = testUser.Id;
+        chunkOne.EventDate = now;
+        chunkOne.ExecutionIdentifier = executionIdentifier;
+        chunkOne.Sequence = 1;
+        chunkOne.RowsProcessed = 12000;
+        chunkOne.Records = '{"totalSize":3,"rows":[]}';
+
+        ListViewEvent chunkTwo = new ListViewEvent();
+        chunkTwo.UserId = testUser.Id;
+        chunkTwo.EventDate = now;
+        chunkTwo.ExecutionIdentifier = executionIdentifier;
+        chunkTwo.Sequence = 2;
+        chunkTwo.RowsProcessed = 12000;
+        chunkTwo.Records = '{"totalSize":4,"rows":[]}';
+
+        Test.startTest();
+        TrxSec_DetectTotalAccessListView policy = new TrxSec_DetectTotalAccessListView();
+        Boolean resultOne = policy.evaluate(chunkOne);
+        Boolean resultTwo = policy.evaluate(chunkTwo);
+        Test.stopTest();
+
+        System.assertEquals(
+            false,
+            resultOne,
+            'First chunk must be scored on its own 3-record payload, not the shared RowsProcessed'
+        );
+        System.assertEquals(
+            false,
+            resultTwo,
+            'Second chunk must be scored on its own 4-record payload, not the shared RowsProcessed'
+        );
+    }
+
+    /**
      * Test that policy isolates users (one user's records don't affect another)
      */
     @isTest

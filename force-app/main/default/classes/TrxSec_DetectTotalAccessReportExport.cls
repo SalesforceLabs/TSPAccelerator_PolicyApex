@@ -10,8 +10,12 @@ global with sharing class TrxSec_DetectTotalAccessReportExport implements TxnSec
         // Cast the event to reportEvent
         reportEvent e = (reportEvent) event;
         
-         // Only evaluate if this is a report export operation
-        if (!'ReportExported'.equals(e.Operation)) {
+         // Only evaluate if this is a report export operation. All three export values in the
+         // Operation picklist must reach the logging and counting below; matching only the exact
+         // string 'ReportExported' skipped asynchronous exports, which is the path Salesforce uses
+         // for large exports, so those records never reached RecordAccessLog__c at all and the
+         // 24-hour aggregate every total-access policy reads was under-counted.
+        if (!TrxSec_ReportEventUtils.isReportExportOperation(e.Operation)) {
             return false;
         }
         
@@ -28,6 +32,29 @@ global with sharing class TrxSec_DetectTotalAccessReportExport implements TxnSec
             System.debug(LoggingLevel.WARN, 'TrxSec_DetectTotalAccessReportExport: failed to start access logging. type=' + ex.getTypeName());
         }
         
+        // Derive this event's own record count so the export being evaluated contributes to the
+        // decision that gates it. logAccessAsync above only publishes a Platform Event, so the row
+        // for this event is not persisted until a subscribing Flow runs; without this the aggregate
+        // below sees history only and a single unbounded export in a fresh window can never trip the
+        // threshold. The same extractRecordCount call is what the Flow's logAccess uses to derive
+        // Count_of_Records__c, so this in-memory count and the persisted history share one basis.
+        //
+        // ReportEvent.RowsProcessed is deliberately not used. When a report execution is chunked,
+        // every ReportEvent sharing an ExecutionIdentifier carries the SAME RowsProcessed (the total
+        // for the whole execution) and differs only in Records and Sequence, so adding RowsProcessed
+        // per event would count an N-chunk export N times. Records holds this chunk's own data,
+        // which is also the unit logAccessAsync publishes per chunk, so each chunk is counted
+        // exactly once and no cross-event de-duplication by ExecutionIdentifier is needed.
+        Integer currentEventRecordCount = 0;
+        try {
+            currentEventRecordCount = LogMultipleRecordAccess.extractRecordCount(e.Records);
+        } catch (Exception ex) {
+            // Fall through to the historical-only comparison rather than letting anything escape a
+            // TSP condition, where a thrown exception has unpredictable enforcement consequences.
+            System.debug(LoggingLevel.WARN, 'TrxSec_DetectTotalAccessReportExport: could not derive current event record count, treating as 0. type=' + ex.getTypeName());
+            currentEventRecordCount = 0;
+        }
+
         // Define the 24-hour window
         Datetime windowStart = e.EventDate.addHours(-24);
         
@@ -46,6 +73,10 @@ global with sharing class TrxSec_DetectTotalAccessReportExport implements TxnSec
         
         Decimal totalRecordsAccessed = (Decimal) ar.get('totalRecords');
         
-        return totalRecordsAccessed != null && totalRecordsAccessed > THRESHOLD;
+        // SUM returns null when the user has no rows in the window; treat that as zero history.
+        Decimal historicalRecordsAccessed = totalRecordsAccessed != null ? totalRecordsAccessed : 0;
+        Decimal combinedRecordsAccessed = historicalRecordsAccessed + currentEventRecordCount;
+        
+        return combinedRecordsAccessed > THRESHOLD;
     }
 }

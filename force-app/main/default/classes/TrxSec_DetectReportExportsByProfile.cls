@@ -19,8 +19,10 @@ global with sharing class TrxSec_DetectReportExportsByProfile implements TxnSecu
     }
     
     private Boolean evaluate(ReportEvent reportEvent) {
-        // Only evaluate if this is a report export operation
-        if (!'ReportExported'.equals(reportEvent.Operation)) {
+        // Only evaluate if this is a report export operation. Matching only the exact string
+        // 'ReportExported' ignored asynchronous and Excel connector exports, so an unapproved
+        // profile could export by either route without the policy ever firing.
+        if (!TrxSec_ReportEventUtils.isReportExportOperation(reportEvent.Operation)) {
             return false;
         }
         

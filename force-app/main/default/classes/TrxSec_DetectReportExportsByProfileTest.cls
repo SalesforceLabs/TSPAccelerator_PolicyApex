@@ -64,6 +64,84 @@ private class TrxSec_DetectReportExportsByProfileTest {
     }
     
     /**
+     * REGRESSION TEST for the export-operation guard defect.
+     *
+     * ReportEvent.Operation is a restricted picklist with exactly three export values:
+     * ReportExported, ReportExportedAsynchronously and ReportExportedUsingExcelConnector. The guard
+     * used to match only 'ReportExported' exactly, so an asynchronous export by an unapproved
+     * profile was silently ignored. Salesforce routes large report exports through asynchronous
+     * export, so this skipped precisely the high-volume exports the policy exists to catch.
+     *
+     * This test fails against the pre-fix code, which returns false for this event.
+     */
+    @isTest
+    static void testAsynchronousExportByUnapprovedProfile() {
+        User currentUser = [SELECT Id, Username, Profile.Name FROM User WHERE Id = :UserInfo.getUserId() LIMIT 1];
+        mockApprovedProfiles(new Set<String>{'SomeOtherProfile'});
+
+        ReportEvent testEvent = new ReportEvent(
+            Operation = 'ReportExportedAsynchronously',
+            UserId = currentUser.Id,
+            Username = currentUser.Username
+        );
+
+        TrxSec_DetectReportExportsByProfile policy = new TrxSec_DetectReportExportsByProfile();
+
+        System.assertEquals(
+            true,
+            policy.evaluate((SObject)testEvent),
+            'ReportExportedAsynchronously must be evaluated, not short-circuited by the guard'
+        );
+    }
+
+    /**
+     * The Excel connector is the third export path and must also be evaluated.
+     */
+    @isTest
+    static void testExcelConnectorExportByUnapprovedProfile() {
+        User currentUser = [SELECT Id, Username, Profile.Name FROM User WHERE Id = :UserInfo.getUserId() LIMIT 1];
+        mockApprovedProfiles(new Set<String>{'SomeOtherProfile'});
+
+        ReportEvent testEvent = new ReportEvent(
+            Operation = 'ReportExportedUsingExcelConnector',
+            UserId = currentUser.Id,
+            Username = currentUser.Username
+        );
+
+        TrxSec_DetectReportExportsByProfile policy = new TrxSec_DetectReportExportsByProfile();
+
+        System.assertEquals(
+            true,
+            policy.evaluate((SObject)testEvent),
+            'ReportExportedUsingExcelConnector must be evaluated, not short-circuited by the guard'
+        );
+    }
+
+    /**
+     * A real non-export Operation picklist value must not trigger the policy. 'ReportRunFromLightning'
+     * is used rather than an invented value, so this genuinely exercises the guard.
+     */
+    @isTest
+    static void testRealNonExportOperationDoesNotTrigger() {
+        User currentUser = [SELECT Id, Username, Profile.Name FROM User WHERE Id = :UserInfo.getUserId() LIMIT 1];
+        mockApprovedProfiles(new Set<String>{'SomeOtherProfile'});
+
+        ReportEvent testEvent = new ReportEvent(
+            Operation = 'ReportRunFromLightning',
+            UserId = currentUser.Id,
+            Username = currentUser.Username
+        );
+
+        TrxSec_DetectReportExportsByProfile policy = new TrxSec_DetectReportExportsByProfile();
+
+        System.assertEquals(
+            false,
+            policy.evaluate((SObject)testEvent),
+            'ReportRunFromLightning is not an export and must not trigger the policy'
+        );
+    }
+
+    /**
      * Test that non-export operations are not flagged, regardless of profile
      */
     @isTest
@@ -209,23 +287,25 @@ private class TrxSec_DetectReportExportsByProfileTest {
         
         TrxSec_DetectReportExportsByProfile policy = new TrxSec_DetectReportExportsByProfile();
         
-        // Test with null operation
-        ReportEvent nullOpEvent = new ReportEvent(
-            Operation = null,
-            UserId = currentUser.Id,
-            Username = currentUser.Username
-        );
-        System.assertEquals(false, policy.evaluate((SObject)nullOpEvent), 
-            'Null operation should not trigger policy');
-        
-        // Test with empty string operation
-        ReportEvent emptyOpEvent = new ReportEvent(
-            Operation = '',
-            UserId = currentUser.Id,
-            Username = currentUser.Username
-        );
-        System.assertEquals(false, policy.evaluate((SObject)emptyOpEvent), 
-            'Empty operation should not trigger policy');
+        // Operation is nillable. The old guard was accidentally null-safe because
+        // 'ReportExported'.equals(null) is false; a prefix match on a null value would throw a
+        // NullPointerException instead. An exception escaping a TSP condition has unpredictable
+        // enforcement consequences, so assert explicitly that nothing is thrown.
+        for (String blankOperation : new List<String>{ null, '' }) {
+            ReportEvent blankOpEvent = new ReportEvent(
+                Operation = blankOperation,
+                UserId = currentUser.Id,
+                Username = currentUser.Username
+            );
+            try {
+                System.assertEquals(false, policy.evaluate((SObject)blankOpEvent),
+                    'A blank Operation should not trigger policy. Operation: ' + blankOperation);
+            } catch (Exception e) {
+                System.assert(false,
+                    'A blank Operation must not throw out of evaluate(). Operation: ' +
+                        blankOperation + ', exception: ' + e.getTypeName() + ' - ' + e.getMessage());
+            }
+        }
     }
     
     /**
