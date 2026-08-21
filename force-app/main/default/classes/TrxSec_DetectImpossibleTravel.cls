@@ -34,6 +34,12 @@ global with sharing class TrxSec_DetectImpossibleTravel implements TxnSecurity.E
         } catch (Exception ex) {
             return false;
         }
+
+        // Subscriber-configured exclusions are honored before anything else, including the
+        // LoginHistory lookup, so an excluded user can never trip this policy.
+        if (e != null && TrxSec_PolicyExclusions.isExcluded(TrxSec_PolicyExclusions.POLICY_IMPOSSIBLE_TRAVEL, e.UserId)) {
+            return false;
+        }
         
         try {
             if (e == null || e.UserId == null || e.EventDate == null) {

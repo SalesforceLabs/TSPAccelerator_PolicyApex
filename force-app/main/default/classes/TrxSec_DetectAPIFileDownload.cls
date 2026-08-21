@@ -27,6 +27,15 @@ global with sharing class TrxSec_DetectAPIFileDownload implements TxnSecurity.Ev
     
     @TestVisible
     private Boolean evaluate(FileEventStore fileEventStore) {
+        // Subscriber-configured exclusions are honored before anything else so an
+        // excluded user can never trip this policy.
+        if (TrxSec_PolicyExclusions.isExcluded(
+            TrxSec_PolicyExclusions.POLICY_API_FILE_DOWNLOAD,
+            fileEventStore.UserId
+        )) {
+            return false;
+        }
+
         // Detect API_DOWNLOAD actions
         if (String.isBlank(fileEventStore.FileAction)) {
             return false;

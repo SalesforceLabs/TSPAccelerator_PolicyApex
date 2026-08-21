@@ -2,13 +2,16 @@
  * @description Transaction Security Policy condition to detect high-volume record access via list views
  */
 global with sharing class TrxSec_DetectTotalAccessListView implements TxnSecurity.EventCondition {
-    
-    // Threshold for unique record access within last 24 hours
-    private static final Integer THRESHOLD = 10000;
-    
+
     global Boolean evaluate(SObject event) {
         // Cast the event to ListViewEvent
         ListViewEvent e = (ListViewEvent) event;
+
+        // Subscriber-configured exclusions are honored before anything else, including logging, so an
+        // excluded user produces no RecordAccessLog__c history and can never trip this policy.
+        if (TrxSec_PolicyExclusions.isExcluded(TrxSec_PolicyExclusions.POLICY_TOTAL_ACCESS_LIST_VIEW, e.UserId)) {
+            return false;
+        }
         
         if (e.UserId == null || e.EventDate == null) {
             return false;
@@ -72,7 +75,8 @@ global with sharing class TrxSec_DetectTotalAccessListView implements TxnSecurit
         // SUM returns null when the user has no rows in the window; treat that as zero history.
         Decimal historicalRecordsAccessed = totalRecordsAccessed != null ? totalRecordsAccessed : 0;
         Decimal combinedRecordsAccessed = historicalRecordsAccessed + currentEventRecordCount;
-        
-        return combinedRecordsAccessed > THRESHOLD;
+
+        Integer threshold = TrxSec_ThresholdSettings.getThreshold(TrxSec_ThresholdSettings.EVENT_LIST_VIEW);
+        return combinedRecordsAccessed > threshold;
     }
 }

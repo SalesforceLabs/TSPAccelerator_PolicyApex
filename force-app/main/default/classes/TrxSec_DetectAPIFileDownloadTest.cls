@@ -82,4 +82,62 @@ private class TrxSec_DetectAPIFileDownloadTest {
         Boolean result = policy.evaluate(apiEvent);
         System.assertEquals(false, result, 'Should return false for wrong event type');
     }
+
+    @isTest
+    static void testExcludedUserDoesNotTrip() {
+        Id userId = UserInfo.getUserId();
+        TrxSec_PolicyExclusions.overridesForTest = new List<Policy_Exclusion__mdt>{
+            new Policy_Exclusion__mdt(
+                User_ID__c = userId,
+                Policy_Apex__c = TrxSec_PolicyExclusions.POLICY_API_FILE_DOWNLOAD
+            )
+        };
+
+        FileEventStore testEvent = new FileEventStore();
+        testEvent.FileAction = 'API_DOWNLOAD';
+        testEvent.UserId = userId;
+
+        Boolean result = new TrxSec_DetectAPIFileDownload().evaluate(testEvent);
+        System.assertEquals(
+            false,
+            result,
+            'An excluded user must not trip even for API_DOWNLOAD'
+        );
+    }
+
+    @isTest
+    static void testExclusionForOtherUserDoesNotSkipCurrentUser() {
+        Id userId = UserInfo.getUserId();
+        Profile p = [SELECT Id FROM Profile WHERE Name='Standard User' LIMIT 1];
+        User otherUser = new User(
+            Alias = 'exoth',
+            Email = 'exclusion.file.other@testorg.com',
+            EmailEncodingKey = 'UTF-8',
+            LastName = 'ExclusionOther',
+            LanguageLocaleKey = 'en_US',
+            LocaleSidKey = 'en_US',
+            ProfileId = p.Id,
+            TimeZoneSidKey = 'America/Los_Angeles',
+            UserName = 'exclusion.file.other' + Datetime.now().getTime() + '@testorg.com'
+        );
+        insert otherUser;
+
+        TrxSec_PolicyExclusions.overridesForTest = new List<Policy_Exclusion__mdt>{
+            new Policy_Exclusion__mdt(
+                User_ID__c = otherUser.Id,
+                Policy_Apex__c = TrxSec_PolicyExclusions.POLICY_API_FILE_DOWNLOAD
+            )
+        };
+
+        FileEventStore testEvent = new FileEventStore();
+        testEvent.FileAction = 'API_DOWNLOAD';
+        testEvent.UserId = userId;
+
+        Boolean result = new TrxSec_DetectAPIFileDownload().evaluate(testEvent);
+        System.assertEquals(
+            true,
+            result,
+            'API_DOWNLOAD must still trip when a different user is the one excluded'
+        );
+    }
 }

@@ -265,4 +265,61 @@ private class TrxSec_DetectImpossibleTravelTest {
         Boolean result = new TrxSec_DetectImpossibleTravel().evaluate(buildEvent(DateTime.now(), 'New York', 'US'));
         System.assertEquals(false, result, 'Provider exceptions should be handled and return false');
     }
+
+    @isTest
+    static void testExcludedUserDoesNotTrip() {
+        DateTime nowTime = DateTime.now();
+        useProvider(new TrxSec_DetectImpossibleTravel.LoginSnapshot(nowTime.addMinutes(-10), 'US', 'Chicago'));
+        TrxSec_PolicyExclusions.overridesForTest = new List<Policy_Exclusion__mdt>{
+            new Policy_Exclusion__mdt(
+                User_ID__c = UserInfo.getUserId(),
+                Policy_Apex__c = TrxSec_PolicyExclusions.POLICY_IMPOSSIBLE_TRAVEL
+            )
+        };
+
+        Boolean result = new TrxSec_DetectImpossibleTravel().evaluate(
+            buildEvent(nowTime, 'New York', 'US')
+        );
+        System.assertEquals(
+            false,
+            result,
+            'An excluded user must not trip even when city changes within 30 minutes'
+        );
+    }
+
+    @isTest
+    static void testExclusionForOtherUserDoesNotSkipCurrentUser() {
+        DateTime nowTime = DateTime.now();
+        useProvider(new TrxSec_DetectImpossibleTravel.LoginSnapshot(nowTime.addMinutes(-10), 'US', 'Chicago'));
+
+        Profile p = [SELECT Id FROM Profile WHERE Name='Standard User' LIMIT 1];
+        User otherUser = new User(
+            Alias = 'exoth',
+            Email = 'exclusion.travel.other@testorg.com',
+            EmailEncodingKey = 'UTF-8',
+            LastName = 'ExclusionOther',
+            LanguageLocaleKey = 'en_US',
+            LocaleSidKey = 'en_US',
+            ProfileId = p.Id,
+            TimeZoneSidKey = 'America/Los_Angeles',
+            UserName = 'exclusion.travel.other' + Datetime.now().getTime() + '@testorg.com'
+        );
+        insert otherUser;
+
+        TrxSec_PolicyExclusions.overridesForTest = new List<Policy_Exclusion__mdt>{
+            new Policy_Exclusion__mdt(
+                User_ID__c = otherUser.Id,
+                Policy_Apex__c = TrxSec_PolicyExclusions.POLICY_IMPOSSIBLE_TRAVEL
+            )
+        };
+
+        Boolean result = new TrxSec_DetectImpossibleTravel().evaluate(
+            buildEvent(nowTime, 'New York', 'US')
+        );
+        System.assertEquals(
+            true,
+            result,
+            'A city change within 30 minutes must still trip when a different user is the one excluded'
+        );
+    }
 }

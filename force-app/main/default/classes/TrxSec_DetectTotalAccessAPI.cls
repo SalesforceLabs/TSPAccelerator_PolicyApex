@@ -3,13 +3,16 @@
  * @description Transaction Security Policy condition to detect high-volume record access via API queries
  */
 global with sharing class TrxSec_DetectTotalAccessAPI implements TxnSecurity.EventCondition {
-    
-    // Threshold for unique record access within last 24 hours
-    private static final Integer THRESHOLD = 10000;
-    
+
     global Boolean evaluate(SObject event) {
         // Cast the event to ApiEvent
         ApiEvent e = (ApiEvent) event;
+
+        // Subscriber-configured exclusions are honored before anything else, including logging, so an
+        // excluded user produces no RecordAccessLog__c history and can never trip this policy.
+        if (TrxSec_PolicyExclusions.isExcluded(TrxSec_PolicyExclusions.POLICY_TOTAL_ACCESS_API, e.UserId)) {
+            return false;
+        }
         
         if (e.UserId == null || e.EventDate == null) {
             return false;
@@ -74,8 +77,9 @@ global with sharing class TrxSec_DetectTotalAccessAPI implements TxnSecurity.Eve
         // SUM returns null when the user has no rows in the window; treat that as zero history.
         Decimal historicalRecordsAccessed = totalRecordsAccessed != null ? totalRecordsAccessed : 0;
         Decimal combinedRecordsAccessed = historicalRecordsAccessed + currentEventRecordCount;
-        
-        return combinedRecordsAccessed > THRESHOLD;
+
+        Integer threshold = TrxSec_ThresholdSettings.getThreshold(TrxSec_ThresholdSettings.EVENT_API);
+        return combinedRecordsAccessed > threshold;
     }
 
 }

@@ -662,5 +662,159 @@ private class TrxSec_DetectTotalAccessAPITest {
         // Should return false for user1 (only 1000 records, not user2's 20000)
         System.assertEquals(false, result1, 'Policy should isolate users and only count user1 records');
     }
+
+    /**
+     * Verifies the policy reads its threshold from TrxSec_ThresholdSettings, not a hard-coded
+     * constant. A payload of 501 records with a subscriber-configured 500 threshold must trip,
+     * even though it would sail past the 10,000 default.
+     */
+    @isTest
+    static void testConfiguredLowerThresholdTrips() {
+        User testUser = [SELECT Id FROM User WHERE Id = :UserInfo.getUserId()];
+
+        TrxSec_ThresholdSettings.overridesForTest.put(
+            TrxSec_ThresholdSettings.EVENT_API, new List<Integer>{ 500 }
+        );
+
+        ApiEvent testEvent = new ApiEvent();
+        testEvent.UserId = testUser.Id;
+        testEvent.EventDate = Datetime.now();
+        testEvent.Records = '{"totalSize":501,"done":true,"records":[]}';
+
+        Test.startTest();
+        TrxSec_DetectTotalAccessAPI policy = new TrxSec_DetectTotalAccessAPI();
+        Boolean result = policy.evaluate(testEvent);
+        Test.stopTest();
+
+        System.assertEquals(
+            true,
+            result,
+            'A 501-record payload must trip when the configured threshold is 500'
+        );
+    }
+
+    /**
+     * The mirror case: at or below the configured threshold, the policy must allow the operation.
+     */
+    @isTest
+    static void testConfiguredLowerThresholdDoesNotTripBelow() {
+        User testUser = [SELECT Id FROM User WHERE Id = :UserInfo.getUserId()];
+
+        TrxSec_ThresholdSettings.overridesForTest.put(
+            TrxSec_ThresholdSettings.EVENT_API, new List<Integer>{ 500 }
+        );
+
+        ApiEvent testEvent = new ApiEvent();
+        testEvent.UserId = testUser.Id;
+        testEvent.EventDate = Datetime.now();
+        testEvent.Records = '{"totalSize":499,"done":true,"records":[]}';
+
+        Test.startTest();
+        TrxSec_DetectTotalAccessAPI policy = new TrxSec_DetectTotalAccessAPI();
+        Boolean result = policy.evaluate(testEvent);
+        Test.stopTest();
+
+        System.assertEquals(
+            false,
+            result,
+            'A 499-record payload must not trip when the configured threshold is 500'
+        );
+    }
+
+    /**
+     * An excluded user must short-circuit before logging and never trip, even when the
+     * payload is far above the configured threshold.
+     */
+    @isTest
+    static void testExcludedUserDoesNotTripAndDoesNotLog() {
+        User testUser = [SELECT Id FROM User WHERE Id = :UserInfo.getUserId()];
+
+        TrxSec_ThresholdSettings.overridesForTest.put(
+            TrxSec_ThresholdSettings.EVENT_API, new List<Integer>{ 500 }
+        );
+        TrxSec_PolicyExclusions.overridesForTest = new List<Policy_Exclusion__mdt>{
+            new Policy_Exclusion__mdt(
+                User_ID__c = testUser.Id,
+                Policy_Apex__c = TrxSec_PolicyExclusions.POLICY_TOTAL_ACCESS_API
+            )
+        };
+
+        ApiEvent testEvent = new ApiEvent();
+        testEvent.UserId = testUser.Id;
+        testEvent.EventDate = Datetime.now();
+        testEvent.Records = '{"totalSize":501,"done":true,"records":[]}';
+
+        Test.startTest();
+        Integer dmlBefore = Limits.getDmlStatements();
+        Integer publishBefore = Limits.getPublishImmediateDML();
+        TrxSec_DetectTotalAccessAPI policy = new TrxSec_DetectTotalAccessAPI();
+        Boolean result = policy.evaluate(testEvent);
+        Integer dmlAfter = Limits.getDmlStatements();
+        Integer publishAfter = Limits.getPublishImmediateDML();
+        Test.stopTest();
+
+        System.assertEquals(
+            false,
+            result,
+            'An excluded user must not trip even when the payload exceeds the threshold'
+        );
+        System.assertEquals(
+            dmlBefore,
+            dmlAfter,
+            'An excluded user must not cause DML, including EventBus.publish'
+        );
+        System.assertEquals(
+            publishBefore,
+            publishAfter,
+            'An excluded user must not publish RecordAccessEvent__e'
+        );
+    }
+
+    /**
+     * An exclusion for a different user must leave this user on the normal evaluation path.
+     */
+    @isTest
+    static void testExclusionForOtherUserDoesNotSkipCurrentUser() {
+        User testUser = [SELECT Id FROM User WHERE Id = :UserInfo.getUserId()];
+        Profile p = [SELECT Id FROM Profile WHERE Name='Standard User' LIMIT 1];
+        User otherUser = new User(
+            Alias = 'exoth',
+            Email = 'exclusion.other@testorg.com',
+            EmailEncodingKey = 'UTF-8',
+            LastName = 'ExclusionOther',
+            LanguageLocaleKey = 'en_US',
+            LocaleSidKey = 'en_US',
+            ProfileId = p.Id,
+            TimeZoneSidKey = 'America/Los_Angeles',
+            UserName = 'exclusion.other' + Datetime.now().getTime() + '@testorg.com'
+        );
+        insert otherUser;
+
+        TrxSec_ThresholdSettings.overridesForTest.put(
+            TrxSec_ThresholdSettings.EVENT_API, new List<Integer>{ 500 }
+        );
+        TrxSec_PolicyExclusions.overridesForTest = new List<Policy_Exclusion__mdt>{
+            new Policy_Exclusion__mdt(
+                User_ID__c = otherUser.Id,
+                Policy_Apex__c = TrxSec_PolicyExclusions.POLICY_TOTAL_ACCESS_API
+            )
+        };
+
+        ApiEvent testEvent = new ApiEvent();
+        testEvent.UserId = testUser.Id;
+        testEvent.EventDate = Datetime.now();
+        testEvent.Records = '{"totalSize":501,"done":true,"records":[]}';
+
+        Test.startTest();
+        TrxSec_DetectTotalAccessAPI policy = new TrxSec_DetectTotalAccessAPI();
+        Boolean result = policy.evaluate(testEvent);
+        Test.stopTest();
+
+        System.assertEquals(
+            true,
+            result,
+            'A 501-record payload must still trip when a different user is the one excluded'
+        );
+    }
 }
 
