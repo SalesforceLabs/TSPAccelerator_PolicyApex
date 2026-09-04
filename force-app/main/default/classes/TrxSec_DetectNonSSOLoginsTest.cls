@@ -25,7 +25,80 @@ private class TrxSec_DetectNonSSOLoginsTest {
         // Should return true (this is a non-SSO login that should be flagged)
         System.assertEquals(true, result, 'Standard user with Application login type should trigger policy');
     }
-    
+
+    /**
+     * Test that a standard user using email/SMS passwordless login triggers the policy
+     */
+    @isTest
+    static void testStandardUserPasswordlessLogin() {
+        LoginEvent testEvent = new LoginEvent(
+            LoginType = 'Passwordless Login',
+            UserType = 'Standard',
+            UserId = UserInfo.getUserId(),
+            Username = UserInfo.getUserName()
+        );
+
+        TrxSec_DetectNonSSOLogins policy = new TrxSec_DetectNonSSOLogins();
+        Boolean result = policy.evaluate((SObject)testEvent);
+
+        System.assertEquals(true, result, 'Standard user with Passwordless Login should trigger policy');
+    }
+
+    /**
+     * Test that a standard user using passkey passwordless login triggers the policy.
+     * This is the passkey gap that prompted expanding the detection set.
+     */
+    @isTest
+    static void testStandardUserPasskeyLogin() {
+        LoginEvent testEvent = new LoginEvent(
+            LoginType = 'Passwordless Login via Passkeys',
+            UserType = 'Standard',
+            UserId = UserInfo.getUserId(),
+            Username = UserInfo.getUserName()
+        );
+
+        TrxSec_DetectNonSSOLogins policy = new TrxSec_DetectNonSSOLogins();
+        Boolean result = policy.evaluate((SObject)testEvent);
+
+        System.assertEquals(true, result, 'Standard user with Passwordless Login via Passkeys should trigger policy');
+    }
+
+    /**
+     * Test that a standard user using Lightning Login triggers the policy
+     */
+    @isTest
+    static void testStandardUserLightningLogin() {
+        LoginEvent testEvent = new LoginEvent(
+            LoginType = 'Lightning Login',
+            UserType = 'Standard',
+            UserId = UserInfo.getUserId(),
+            Username = UserInfo.getUserName()
+        );
+
+        TrxSec_DetectNonSSOLogins policy = new TrxSec_DetectNonSSOLogins();
+        Boolean result = policy.evaluate((SObject)testEvent);
+
+        System.assertEquals(true, result, 'Standard user with Lightning Login should trigger policy');
+    }
+
+    /**
+     * Test that a non-standard user is excluded even for direct UI login types
+     */
+    @isTest
+    static void testPasskeyLoginNonStandardUser() {
+        LoginEvent testEvent = new LoginEvent(
+            LoginType = 'Passwordless Login via Passkeys',
+            UserType = 'Guest',
+            UserId = UserInfo.getUserId(),
+            Username = UserInfo.getUserName()
+        );
+
+        TrxSec_DetectNonSSOLogins policy = new TrxSec_DetectNonSSOLogins();
+        Boolean result = policy.evaluate((SObject)testEvent);
+
+        System.assertEquals(false, result, 'Passkey login by a non-standard user should not trigger policy');
+    }
+
     /**
      * Test that an SSO login does not trigger the policy
      */
@@ -122,6 +195,24 @@ private class TrxSec_DetectNonSSOLoginsTest {
             Username = UserInfo.getUserName()
         );
         System.assertEquals(false, policy.evaluate((SObject)certEvent), 'Certificate-based login should not trigger policy');
+
+        // Test IdP-initiated SAML SSO login
+        LoginEvent samlIdpEvent = new LoginEvent(
+            LoginType = 'SAML Idp Initiated SSO',
+            UserType = 'Standard',
+            UserId = UserInfo.getUserId(),
+            Username = UserInfo.getUserName()
+        );
+        System.assertEquals(false, policy.evaluate((SObject)samlIdpEvent), 'SAML IdP initiated SSO should not trigger policy');
+
+        // Test generic third-party SSO login
+        LoginEvent thirdPartySsoEvent = new LoginEvent(
+            LoginType = 'Third Party SSO',
+            UserType = 'Standard',
+            UserId = UserInfo.getUserId(),
+            Username = UserInfo.getUserName()
+        );
+        System.assertEquals(false, policy.evaluate((SObject)thirdPartySsoEvent), 'Third Party SSO should not trigger policy');
     }
     
     /**
