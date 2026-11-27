@@ -18,6 +18,17 @@ Now that you have the source, you can clone to:
 
 As a reminder - always test in a sandbox or scratch org first—these policies run in real time and can affect logins and API access.
 
+## Conditions added from the TSP cookbook and Data 360
+
+| Class | Event | Intended action |
+|---|---|---|
+| `TrxSec_DetectCriticalPermissionGrant` | `PermissionSetEventStore` | Alert when a permission set or profile with a critical permission is assigned to users |
+| `TrxSec_DetectExemptPermissionGrant` | `PermissionSetEventStore` | Block enabling or assigning `TransactionSecurityExempt` |
+| `TrxSec_DetectClientExport` | `ApiEvent` | Block large exports from monitored API clients (default: Salesforce Inspector Reloaded) |
+| `TrxSec_DetectLargeDataCloudQueries` | `ApiEvent` | Block or alert on large queries of Data 360 objects |
+
+Each one honors per-user exclusions (`Policy_Exclusion__mdt`, with the Apex class name in `Policy_Apex__c`), which is how you exempt a CI/CD user. The lists they use (`ignoredPermissions`, `monitoredClients`, `dataCloudSuffixes`) are static sets at the top of each class, compared case-insensitively. The row limits for the two `ApiEvent` conditions go through `TrxSec_ThresholdSettings`.
+
 ## Need the full picture?
 
 For setup, deployment, authentication, and how to use the TSP Accelerator app itself, see the listing on the [AppExchange](https://appexchange.salesforce.com/appxListingDetail?listingId=b5e1fa52-8a6d-4a7f-b787-88b0ede9e524).

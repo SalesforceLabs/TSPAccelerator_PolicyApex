@@ -21,6 +21,10 @@ public with sharing class TrxSec_PolicyExclusions {
     public static final String POLICY_LOGIN_AS = 'TrxSec_DetectLoginAsEvent';
     public static final String POLICY_IMPOSSIBLE_TRAVEL = 'TrxSec_DetectImpossibleTravel';
     public static final String POLICY_API_FILE_DOWNLOAD = 'TrxSec_DetectAPIFileDownload';
+    public static final String POLICY_CRITICAL_PERMISSION_GRANT = 'TrxSec_DetectCriticalPermissionGrant';
+    public static final String POLICY_EXEMPT_PERMISSION_GRANT = 'TrxSec_DetectExemptPermissionGrant';
+    public static final String POLICY_CLIENT_EXPORT = 'TrxSec_DetectClientExport';
+    public static final String POLICY_LARGE_DATA_CLOUD_QUERIES = 'TrxSec_DetectLargeDataCloudQueries';
 
     // Normalized policy key -> 18-character user Ids. Built once per transaction.
     private static Map<String, Set<String>> exclusionsByPolicy;
