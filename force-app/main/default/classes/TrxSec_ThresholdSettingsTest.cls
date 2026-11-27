@@ -137,4 +137,40 @@ private class TrxSec_ThresholdSettingsTest {
             'An empty candidate list is the "no records for this event" case'
         );
     }
+
+    @IsTest
+    static void customDefaultUsedWhenNoRecordExists() {
+        Integer result = TrxSec_ThresholdSettings.getThreshold(
+            TrxSec_ThresholdSettings.EVENT_CLIENT_EXPORT, 2000
+        );
+
+        System.assertEquals(2000, result, 'The caller supplied default is used when no record exists');
+    }
+
+    @IsTest
+    static void invalidCustomDefaultFallsBackToPackagedDefault() {
+        System.assertEquals(
+            TrxSec_ThresholdSettings.DEFAULT_THRESHOLD,
+            TrxSec_ThresholdSettings.getThreshold(TrxSec_ThresholdSettings.EVENT_CLIENT_EXPORT, null),
+            'A null default falls back to the packaged default'
+        );
+        System.assertEquals(
+            TrxSec_ThresholdSettings.DEFAULT_THRESHOLD,
+            TrxSec_ThresholdSettings.getThreshold(TrxSec_ThresholdSettings.EVENT_CLIENT_EXPORT, 0),
+            'A non-positive default falls back to the packaged default'
+        );
+    }
+
+    @IsTest
+    static void overrideWinsOverCustomDefault() {
+        TrxSec_ThresholdSettings.overridesForTest.put(
+            TrxSec_ThresholdSettings.EVENT_DATA_CLOUD_QUERY, new List<Integer>{ 500, 800 }
+        );
+
+        System.assertEquals(
+            500,
+            TrxSec_ThresholdSettings.getThreshold(TrxSec_ThresholdSettings.EVENT_DATA_CLOUD_QUERY, 2000),
+            'The lowest configured value wins over the caller supplied default'
+        );
+    }
 }

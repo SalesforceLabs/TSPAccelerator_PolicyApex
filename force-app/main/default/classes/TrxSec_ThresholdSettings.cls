@@ -20,6 +20,11 @@ public with sharing class TrxSec_ThresholdSettings {
     public static final String EVENT_LIST_VIEW = 'ListViewEvent';
     public static final String EVENT_REPORT = 'ReportEvent';
 
+    // Keys for the row-limit policies. Their default is lower than DEFAULT_THRESHOLD, so they
+    // resolve through getThreshold(eventName, defaultValue).
+    public static final String EVENT_CLIENT_EXPORT = 'ClientExport';
+    public static final String EVENT_DATA_CLOUD_QUERY = 'DataCloudQuery';
+
     // Custom metadata records cannot be created or modified via DML, so tests need another
     // way to exercise the resolver. Each key is an event name and the value is the list of
     // Threshold__c values that would come out of Detection_Threshold__mdt.getAll() for that
@@ -38,6 +43,19 @@ public with sharing class TrxSec_ThresholdSettings {
      * @param eventName One of the EVENT_* constants (or any Event_Name__c picklist API value).
      */
     public static Integer getThreshold(String eventName) {
+        return getThreshold(eventName, DEFAULT_THRESHOLD);
+    }
+
+    /**
+     * @description Same resolution as getThreshold(eventName), but falls back to the given
+     * defaultValue instead of DEFAULT_THRESHOLD. A null or non-positive defaultValue falls back
+     * to DEFAULT_THRESHOLD, so the "never fire on every event" guarantee still holds.
+     *
+     * @param eventName One of the EVENT_* constants (or any Event_Name__c picklist API value).
+     * @param defaultValue Value used when no usable record exists for the event.
+     */
+    public static Integer getThreshold(String eventName, Integer defaultValue) {
+        Integer fallback = (defaultValue == null || defaultValue <= 0) ? DEFAULT_THRESHOLD : defaultValue;
         Integer lowest = null;
 
         if (overridesForTest.containsKey(eventName)) {
@@ -59,7 +77,7 @@ public with sharing class TrxSec_ThresholdSettings {
             }
         }
 
-        return lowest == null ? DEFAULT_THRESHOLD : lowest;
+        return lowest == null ? fallback : lowest;
     }
 
     /**
